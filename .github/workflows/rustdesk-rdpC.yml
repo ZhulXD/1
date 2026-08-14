@@ -1,0 +1,92 @@
+name: Windows RDP via RustDesk
+
+on:
+  workflow_dispatch: # Hanya bisa dijalankan manual dari tab Actions
+
+jobs:
+  build:
+    name: Setup Windows & RustDesk
+    runs-on: windows-latest
+    timeout-minutes: 360
+
+    steps:
+      - name: Checkout Repository
+        uses: actions/checkout@v4
+
+      - name: Install and Configure RustDesk
+        run: |
+          Write-Host "Downloading RustDesk..."
+          $url = "https://github.com/rustdesk/rustdesk/releases/download/1.2.4/rustdesk-1.2.4-x86_64.exe"
+          $output = "$env:TEMP\rustdesk.exe"
+          
+          try {
+              Invoke-WebRequest -Uri $url -OutFile $output -ErrorAction Stop
+          } catch {
+              Write-Host "Gagal download, mencoba mirror..."
+              Invoke-WebRequest -Uri "https://github.com/rustdesk/rustdesk/releases/latest/download/rustdesk-1.2.4-x86_64.exe" -OutFile $output
+          }
+
+          Write-Host "Installing RustDesk silently..."
+          Start-Process -FilePath $output -ArgumentList "--silent-install" -Wait
+          Start-Sleep -Seconds 10
+
+          $rustdeskPath = "C:\Program Files\RustDesk\rustdesk.exe"
+          
+          # GANTI PASSWORD INI SESUKA HATIMU
+          $password = "RustDeskBypass123"
+
+          Write-Host "Setting RustDesk Password..."
+          Start-Process -FilePath $rustdeskPath -ArgumentList "--password", $password -Wait
+
+          Write-Host "Starting RustDesk Service..."
+          Start-Process -FilePath $rustdeskPath
+          
+          # Tunggu dan cari ID di berbagai kemungkinan folder
+          $rustdeskId = $null
+          $possiblePaths = @(
+              "$env:APPDATA\RustDesk\config\RustDesk.toml",
+              "C:\Windows\System32\config\systemprofile\AppData\Roaming\RustDesk\config\RustDesk.toml",
+              "C:\Windows\ServiceProfiles\LocalService\AppData\Roaming\RustDesk\config\RustDesk.toml"
+          )
+
+          for ($i=0; $i -le 15; $i++) {
+            Write-Host "Mencoba mencari ID (Percobaan $($i+1)/15)..."
+            Start-Sleep -Seconds 5
+            
+            foreach ($path in $possiblePaths) {
+                if (Test-Path $path) {
+                    $content = Get-Content $path -ErrorAction SilentlyContinue
+                    $idLine = $content | Where-Object { $_ -match "^id=" } | Select-Object -First 1
+                    if ($idLine) { 
+                        $rustdeskId = $idLine.Split('=')[1].Trim().Trim('"')
+                        break 
+                    }
+                }
+            }
+            if ($rustdeskId) { break }
+          }
+
+          if ($rustdeskId) {
+              Write-Host "========================================="
+              Write-Host "🚀 RUSTDESK ID: $rustdeskId"
+              Write-Host "🔑 PASSWORD: $password"
+              Write-Host "========================================="
+          } else {
+              # Jika ID belum ketemu, tampilkan isi folder agar kita bisa debug
+              Write-Host "ID belum tergenerate. Debugging info:"
+              foreach ($path in $possiblePaths) {
+                  Write-Host "Cek path: $path"
+                  if (Test-Path $path) { Get-Content $path }
+              }
+          }
+        shell: pwsh
+
+      - name: Keep Runner Alive
+        run: |
+          Write-Host "Windows is running. Keeping session alive for 6 hours..."
+          $endTime = (Get-Date).AddHours(6)
+          while ((Get-Date) -lt $endTime) {
+              Start-Sleep -Seconds 60
+              Write-Host "Still alive... Time remaining: $($endTime - (Get-Date))"
+          }
+        shell: pwsh
