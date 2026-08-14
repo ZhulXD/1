@@ -1,0 +1,75 @@
+      - name: Install and Configure RustDesk
+        run: |
+          Write-Host "Downloading RustDesk..."
+          $url = "https://github.com/rustdesk/rustdesk/releases/download/1.2.4/rustdesk-1.2.4-x86_64.exe"
+          $output = "$env:TEMP\rustdesk.exe"
+          
+          try {
+              Invoke-WebRequest -Uri $url -OutFile $output -ErrorAction Stop
+          } catch {
+              Write-Host "Gagal download, mencoba mirror..."
+              Invoke-WebRequest -Uri "https://github.com/rustdesk/rustdesk/releases/latest/download/rustdesk-1.2.4-x86_64.exe" -OutFile $output
+          }
+
+          Write-Host "Installing RustDesk silently (tanpa -Wait)..."
+          # Menggunakan --silent-install tanpa -Wait agar tidak nyangkut
+          Start-Process -FilePath $output -ArgumentList "--silent-install"
+          
+          # Beri waktu 30 detik untuk installer menyelesaikan proses di background
+          Write-Host "Menunggu 30 detik agar instalasi selesai..."
+          Start-Sleep -Seconds 30
+
+          $rustdeskPath = "C:\Program Files\RustDesk\rustdesk.exe"
+          
+          if (-not (Test-Path $rustdeskPath)) {
+              Write-Host "RustDesk belum terinstall di path default. Mencoba mencari..."
+              $rustdeskPath = (Get-ChildItem -Path "C:\Program Files\RustDesk" -Filter "rustdesk.exe" -Recurse -ErrorAction SilentlyContinue | Select-Object -First 1).FullName
+          }
+
+          # GANTI PASSWORD INI SESUKA HATIMU
+          $password = "RustDeskBypass123"
+
+          Write-Host "Setting RustDesk Password..."
+          Start-Process -FilePath $rustdeskPath -ArgumentList "--password", $password -Wait
+
+          Write-Host "Starting RustDesk Service..."
+          Start-Process -FilePath $rustdeskPath
+          
+          # Tunggu dan cari ID di berbagai kemungkinan folder
+          $rustdeskId = $null
+          $possiblePaths = @(
+              "$env:APPDATA\RustDesk\config\RustDesk.toml",
+              "C:\Windows\System32\config\systemprofile\AppData\Roaming\RustDesk\config\RustDesk.toml",
+              "C:\Windows\ServiceProfiles\LocalService\AppData\Roaming\RustDesk\config\RustDesk.toml"
+          )
+
+          for ($i=0; $i -le 20; $i++) {
+            Write-Host "Mencoba mencari ID (Percobaan $($i+1)/20)..."
+            Start-Sleep -Seconds 5
+            
+            foreach ($path in $possiblePaths) {
+                if (Test-Path $path) {
+                    $content = Get-Content $path -ErrorAction SilentlyContinue
+                    $idLine = $content | Where-Object { $_ -match "^id=" } | Select-Object -First 1
+                    if ($idLine) { 
+                        $rustdeskId = $idLine.Split('=')[1].Trim().Trim('"')
+                        break 
+                    }
+                }
+            }
+            if ($rustdeskId) { break }
+          }
+
+          if ($rustdeskId) {
+              Write-Host "========================================="
+              Write-Host "🚀 RUSTDESK ID: $rustdeskId"
+              Write-Host "🔑 PASSWORD: $password"
+              Write-Host "========================================="
+          } else {
+              Write-Host "ID belum tergenerate. Debugging info:"
+              foreach ($path in $possiblePaths) {
+                  Write-Host "Cek path: $path"
+                  if (Test-Path $path) { Get-Content $path }
+              }
+          }
+        shell: pwsh
