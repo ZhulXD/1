@@ -1,0 +1,93 @@
+name: Windows RDP via RustDesk
+
+on:
+  workflow_dispatch: # Bisa dijalankan secara manual
+  push:
+    branches:
+      - main
+
+jobs:
+  build:
+    name: Setup Windows & RustDesk
+    runs-on: windows-latest
+    timeout-minutes: 360 # Otomatis berhenti setelah 6 jam
+
+    steps:
+      - name: Checkout Repository
+        uses: actions/checkout@v4
+
+      - name: Enable RDP & Configure Windows
+        run: |
+          # Enable RDP di Windows
+          Set-ItemProperty -Path 'HKLM:\System\CurrentControlSet\Control\Terminal Server' -name "fDenyTSConnections" -value 0
+          Enable-NetFirewallRule -DisplayGroup "Remote Desktop"
+          
+          # Buat user admin (opsional, jika kamu butuh login RDP lokal nanti)
+          $Password = ConvertTo-SecureString "Admin@12345" -AsPlainText -Force
+          New-LocalUser -Name "GithubAdmin" -Password $Password -FullName "Github Admin" -Description "Administrator Account"
+          Add-LocalGroupMember -Group "Administrators" -Member "GithubAdmin"
+          
+          Write-Host "Windows RDP Enabled and User Created."
+
+      - name: Install and Configure RustDesk
+        run: |
+          Write-Host "Downloading RustDesk..."
+          $url = "https://github.com/rustdesk/rustdesk/releases/download/1.3.1/rustdesk-1.3.1-x86_64.exe"
+          $output = "$env:TEMP\rustdesk.exe"
+          Invoke-WebRequest -Uri $url -OutFile $output
+
+          Write-Host "Installing RustDesk silently..."
+          Start-Process -FilePath $output -ArgumentList "--silent-install" -Wait
+          Start-Sleep -Seconds 5
+
+          $rustdeskPath = "C:\Program Files\RustDesk\rustdesk.exe"
+          
+          # GANTI PASSWORD DI BAWAH INI SESUKA HATIMU
+          $password = "PasswordKamu123"
+
+          Write-Host "Setting RustDesk Password..."
+          Start-Process -FilePath $rustdeskPath -ArgumentList "--password", $password -Wait
+
+          Write-Host "Starting RustDesk Service..."
+          Start-Process -FilePath $rustdeskPath
+          Start-Sleep -Seconds 15
+
+          # Mencari ID RustDesk secara otomatis
+          $configFile = "$env:APPDATA\RustDesk\config\RustDesk.toml"
+          $systemConfigFile = "C:\Windows\System32\config\systemprofile\AppData\Roaming\RustDesk\config\RustDesk.toml"
+          $rustdeskId = $null
+
+          for ($i=0; $i -le 10; $i++) {
+            Start-Sleep -Seconds 3
+            if (Test-Path $configFile) {
+                $content = Get-Content $configFile -ErrorAction SilentlyContinue
+                $idLine = $content | Where-Object { $_ -match "^id=" } | Select-Object -First 1
+                if ($idLine) { $rustdeskId = $idLine.Split('=')[1].Trim().Trim('"'); break }
+            }
+            if (Test-Path $systemConfigFile) {
+                $content = Get-Content $systemConfigFile -ErrorAction SilentlyContinue
+                $idLine = $content | Where-Object { $_ -match "^id=" } | Select-Object -First 1
+                if ($idLine) { $rustdeskId = $idLine.Split('=')[1].Trim().Trim('"'); break }
+            }
+          }
+
+          if ($rustdeskId) {
+              Write-Host "========================================="
+              Write-Host "🚀 RUSTDESK ID: $rustdeskId"
+              Write-Host "🔑 PASSWORD: $password"
+              Write-Host "========================================="
+          } else {
+              Write-Host "ID belum tergenerate. Coba cek folder config RustDesk secara manual."
+          }
+        shell: pwsh
+
+      - name: Keep Runner Alive
+        run: |
+          Write-Host "Windows is running. Keeping session alive for 6 hours..."
+          # Looping agar workflow tidak berhenti dan PC tetap menyala
+          $endTime = (Get-Date).AddHours(6)
+          while ((Get-Date) -lt $endTime) {
+              Start-Sleep -Seconds 60
+              Write-Host "Still alive... Time remaining: $($endTime - (Get-Date))"
+          }
+        shell: pwsh
