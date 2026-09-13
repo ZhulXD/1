@@ -7,7 +7,7 @@ on:
       ts_api_key:         { description: "Tailscale API key (device admin, no Bearer)", required: true }
       ts_authkey:         { description: "Tailscale Auth key (reusable or ephemeral)", required: true }
       quick_test:         { description: "Run 5-minute test", type: boolean, default: false }
-      runtime_minutes:    { description: "Runtime (max 360; default 355 when not test)", required: false, default: "355" }
+      runtime_minutes:    { description: "Runtime minutes (max 360 = 6h hard limit; default 360)", required: false, default: "360" }
       do_purge:           { description: "Purge bullet* devices at start (single instance only)", required: false, default: "true" }
       cycles:             { description: "0=stop after A; N=handoffs left incl this run", required: false, default: "0" }
       rdp_count:          { description: "How many RDP instances (1-10) [ignored if CRD provided]", required: false, default: "1" }
@@ -63,7 +63,7 @@ jobs:
     strategy:
       matrix: ${{ fromJson(needs.setup.outputs.matrix) }}
       max-parallel: 10
-    timeout-minutes: 370
+    timeout-minutes: 360  # GitHub-hosted runners are hard-killed at 6h
     env:
       RDP_USER: Bullettemporary
       RDP_PASS: Bullet@12345
@@ -77,6 +77,8 @@ jobs:
           '@.Trim()
           if ($crd.Length -gt 0) { "CRD_ENABLED=1" | Out-File -Append $env:GITHUB_ENV } else { "CRD_ENABLED=0" | Out-File -Append $env:GITHUB_ENV }
           Write-Host "CRD_ENABLED=$([int]($crd.Length -gt 0))"
+          # Record job start so Keep-alive can stop just before GitHub's 6h hard kill
+          "JOB_START_EPOCH=$([DateTimeOffset]::UtcNow.ToUnixTimeSeconds())" | Out-File -Append $env:GITHUB_ENV
 
       - name: Install Chrome Remote Desktop Host (if missing)  # EXE -> MSI fallback
         if: env.CRD_ENABLED == '1'
@@ -171,10 +173,10 @@ jobs:
 
           function Yes($v){ "$v" -match '^(?i:true|1|yes|on)$' }
           function IntOr($v,$d){ if("$v" -match '^\d+$'){ [int]$v } else { [int]$d } }
-          $runtime = IntOr("${{ inputs.runtime_minutes }}",355)
+          $runtime = IntOr("${{ inputs.runtime_minutes }}",360)
           if (Yes("${{ inputs.quick_test }}")) { $runtime = 5 }
-          if (-not (Yes("${{ inputs.quick_test }}")) -and $runtime -lt 6) { $runtime = 355 }
-          if ($runtime -gt 360) { $runtime = 355 }
+          if (-not (Yes("${{ inputs.quick_test }}")) -and $runtime -lt 6) { $runtime = 360 }
+          if ($runtime -gt 360) { $runtime = 360 }
           "RUNTIME_MINUTES=$runtime" | Out-File -Append $env:GITHUB_ENV
           Write-Host "Hostname: $hn  | Runtime: $runtime"
 
@@ -639,7 +641,20 @@ jobs:
       - name: Keep alive (to ${{ env.RUNTIME_MINUTES }} mins)
         run: |
           $mins = [int]"${{ env.RUNTIME_MINUTES }}"
-          $end = (Get-Date).AddMinutes($mins)
+          $reqEnd = (Get-Date).AddMinutes($mins)
+
+          # GitHub hard-kills jobs at 360 min. Stop at job-start + 358m so the
+          # 'Dispatch next or stop' step still runs gracefully afterwards.
+          $hardEnd = $null
+          if ("$env:JOB_START_EPOCH" -match '^\d+$') {
+            $hardEnd = [DateTimeOffset]::FromUnixTimeSeconds([long]$env:JOB_START_EPOCH).LocalDateTime.AddMinutes(358)
+          }
+          $end = $reqEnd
+          if ($hardEnd -and $reqEnd -gt $hardEnd) {
+            $end = $hardEnd
+            Write-Host "Runtime capped by GitHub 6h job limit: keep-alive ends at $($end.ToString('HH:mm:ss'))"
+          }
+
           while ((Get-Date) -lt $end) {
             $mode = if ("$env:CRD_ENABLED" -eq '1') { '[CRD+RustDesk/RDP]' } else { '[RustDesk/RDP]' }
             $extra = ""
