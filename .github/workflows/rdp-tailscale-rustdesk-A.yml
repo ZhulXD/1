@@ -200,18 +200,85 @@ jobs:
           }
 
       - name: Install + Up Tailscale
+        timeout-minutes: 10   # hard kill-switch: never hang 6h again
         run: |
+          $ErrorActionPreference = 'Stop'
           $ts = "$env:ProgramFiles\Tailscale\tailscale.exe"
+
+          # External commands can block FOREVER on a stalled download, a wedged
+          # msiexec, or tailscaled not responding. This guard kills them after
+          # a fixed deadline so the step fails fast with a clear message.
+          function Invoke-Guarded([string]$File, [string[]]$CmdArgs, [int]$TimeoutSec, [string]$What, [switch]$NoFail) {
+            $out = "$env:TEMP\guard-out.txt"; $err = "$env:TEMP\guard-err.txt"
+            Remove-Item $out, $err -Force -ErrorAction SilentlyContinue
+            $p = Start-Process -FilePath $File -ArgumentList $CmdArgs -NoNewWindow -PassThru `
+                 -RedirectStandardOutput $out -RedirectStandardError $err
+            if (-not $p.WaitForExit($TimeoutSec * 1000)) {
+              try { $p.Kill() } catch {}
+              $log = (Get-Content $out, $err -Raw -ErrorAction SilentlyContinue) -join "`n"
+              if ($NoFail) { Write-Host "WARN: $What timed out after ${TimeoutSec}s (killed). $log"; return $null }
+              throw "$What TIMED OUT after ${TimeoutSec}s (process killed). Output: $log"
+            }
+            $stdout = Get-Content $out -Raw -ErrorAction SilentlyContinue
+            $stderr = Get-Content $err -Raw -ErrorAction SilentlyContinue
+            if ($stdout) { Write-Host $stdout.Trim() }
+            if ($p.ExitCode -ne 0) {
+              if ($NoFail) { Write-Host "WARN: $What exited $($p.ExitCode): $stderr"; return $null }
+              throw "$What failed (exit $($p.ExitCode)): $stderr"
+            }
+            return $stdout
+          }
+
           if (-not (Test-Path $ts)) {
             $url = "https://pkgs.tailscale.com/stable/tailscale-setup-1.82.0-amd64.msi"
             $dst = "$env:TEMP\tailscale.msi"
-            Invoke-WebRequest -Uri $url -OutFile $dst
-            Start-Process msiexec.exe -ArgumentList "/i","`"$dst`"","/quiet","/norestart" -Wait
-            Remove-Item $dst -Force
+            Write-Host "Downloading $url ..."
+            # curl.exe has real connect/total timeouts + retries; plain Invoke-WebRequest has NO default timeout and can stall forever
+            curl.exe -fSL -sS --connect-timeout 30 --max-time 600 --retry 3 --retry-delay 5 -o $dst $url
+            if ($LASTEXITCODE -ne 0 -or -not (Test-Path $dst)) { throw "Tailscale MSI download failed (curl exit $LASTEXITCODE)." }
+            $size = (Get-Item $dst).Length
+            if ($size -lt 40MB) { Remove-Item $dst -Force -ErrorAction SilentlyContinue; throw "Downloaded MSI looks truncated ($size bytes)." }
+            Write-Host ("Downloaded {0:N1} MB." -f ($size/1MB))
+
+            Write-Host "Installing MSI (max 240s)..."
+            $msi = Start-Process msiexec.exe -ArgumentList "/i","`"$dst`"","/quiet","/norestart" -PassThru
+            if (-not $msi.WaitForExit(240000)) {
+              try { $msi.Kill() } catch {}
+              Remove-Item $dst -Force -ErrorAction SilentlyContinue
+              throw "msiexec hung >240s (killed). Failing fast instead of hanging the job."
+            }
+            Remove-Item $dst -Force -ErrorAction SilentlyContinue
+            if ($msi.ExitCode -notin 0, 3010) { throw "msiexec failed with exit code $($msi.ExitCode)." }
+            Write-Host "MSI install finished (exit $($msi.ExitCode))."
+            if (-not (Test-Path $ts)) { throw "tailscale.exe not found at $ts after install." }
+          } else {
+            Write-Host "Tailscale already installed."
           }
-          & $ts logout | Out-Null
-          & $ts up --authkey "${{ inputs.ts_authkey }}" --hostname "$env:TS_HOSTNAME" --accept-dns=true --accept-routes=true
-          $ip4 = & $ts ip -4 | Select-Object -First 1
+
+          # Fresh MSI install: the Tailscale service can take a while to appear/start
+          $svcDeadline = (Get-Date).AddSeconds(90)
+          do {
+            $svc = Get-Service -Name "Tailscale" -ErrorAction SilentlyContinue
+            if ($svc -and $svc.Status -eq 'Running') { break }
+            Start-Sleep -Seconds 3
+          } while ((Get-Date) -lt $svcDeadline)
+          $svc = Get-Service -Name "Tailscale" -ErrorAction SilentlyContinue
+          if (-not $svc) { throw "Tailscale service missing after install." }
+          if ($svc.Status -ne 'Running') {
+            Write-Host "Tailscale service is $($svc.Status); starting it..."
+            Start-Service Tailscale
+            Start-Sleep -Seconds 10
+          }
+          Write-Host "Tailscale service status: $((Get-Service -Name Tailscale).Status)"
+
+          Invoke-Guarded $ts @('logout') 60 'tailscale logout' -NoFail | Out-Null
+
+          # --timeout bounds tailscale's own wait; Invoke-Guarded is the hard kill-switch
+          Invoke-Guarded $ts @('up','--authkey',"${{ inputs.ts_authkey }}",'--hostname',"$env:TS_HOSTNAME",'--accept-dns=true','--accept-routes=true','--timeout=120s') 150 'tailscale up' | Out-Null
+
+          $ipOut = Invoke-Guarded $ts @('ip','-4') 30 'tailscale ip -4'
+          $ip4 = ($ipOut -split "\r?\n" | Select-Object -First 1).Trim()
+          if (-not $ip4) { throw "tailscale ip -4 returned nothing." }
           "TAILSCALE_IP=$ip4" | Out-File -Append $env:GITHUB_ENV
           Write-Host "Tailscale IPv4: $ip4"
 
@@ -611,7 +678,7 @@ jobs:
                 crd_code        = "${{ inputs.crd_code }}"
                 crd_pin         = "${{ inputs.crd_pin }}"
               }
-              $url2 = "https://api.github.com/repos/${{ github.repository }}/actions/workflows/rdp-tailscale-B.yml/dispatches"
+              $url2 = "https://api.github.com/repos/${{ github.repository }}/actions/workflows/rdp-tailscale-rustdesk-B.yml/dispatches"
               $hdr2 = @{ Authorization = "Bearer $env:GH_TOKEN"; Accept = "application/vnd.github+json" }
               $body2 = @{ ref="${{ github.ref_name }}"; inputs=$payload } | ConvertTo-Json -Depth 20
               Invoke-WebRequest -Method POST -Uri $url2 -Headers $hdr2 -Body $body2 | Out-Null
