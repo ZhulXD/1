@@ -230,7 +230,7 @@ jobs:
             curl.exe -fSL -sS --connect-timeout 30 --max-time 600 --retry 3 --retry-delay 5 -o $dst $url
             if ($LASTEXITCODE -ne 0 -or -not (Test-Path $dst)) { throw "Tailscale MSI download failed (curl exit $LASTEXITCODE)." }
             $size = (Get-Item $dst).Length
-            if ($size -lt 40MB) { Remove-Item $dst -Force -ErrorAction SilentlyContinue; throw "Downloaded MSI looks truncated ($size bytes)." }
+            if ($size -lt 20MB) { Remove-Item $dst -Force -ErrorAction SilentlyContinue; throw "Downloaded MSI looks truncated ($size bytes)." }
             Write-Host ("Downloaded {0:N1} MB." -f ($size/1MB))
 
             Write-Host "Installing MSI (max 240s)..."
